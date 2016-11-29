@@ -49,6 +49,12 @@ class UberQueue {
       [PHASE.OUTBOUND]: new Set()
     });
 
+    // Previous results to feed into resolvees if available. There will be up to
+    // `concurrency.resolving` amount of times a resolvee will be called without
+    // a previous result being passed in, but they will otherwise be passed in
+    // the order they arrive.
+    p(this).previousResults = new Set();
+
 
     // Conditionals to see if can progress inbound, resolving, and outbound.
     // Additional conditionals can be set by the user.
@@ -283,14 +289,14 @@ class UberQueue {
   }
 
   /**
-   *
+   * TODO: implement
    */
   setComplete() {
     p(this).state.complete = true;
   }
 
   /**
-   *
+   * TODO: implement
    */
   isComplete() {
     return p(this).state.complete;
@@ -311,6 +317,7 @@ class UberQueue {
     });
 
     // TODO: implement
+    // TODO: add options for concurrent wait times.
     // `waitMin` is the minium wait time between handling.
     config.waitMin = config.waitMin || {};
     p(this).waitMin = Object.freeze({
@@ -386,10 +393,14 @@ class UberQueue {
 
     p(this).metrics.resolving++;
     
-    resolvee.resolve()
+    resolvee.resolve(this._shiftPreviousResult())
     .tap(queueResult => {
       // Add to primary outbound queue.
       p(this).queue[PHASE.OUTBOUND].add(queueResult);
+
+      // Add to previous results list to pass into subsequent resolvees.
+      p(this).previousResults.add(queueResult);
+
       // Add to individual reader outbound queues.
       p(this).queueReaders.forEach((queue) => {
         queue.add(queueResult);
@@ -425,5 +436,14 @@ class UberQueue {
     p(this).deferred.onceResult.clear();
 
     this.refresh();
+  }
+
+  /**
+   *
+   */
+  _shiftPreviousResult() {
+    const result = p(this).previousResults.values().next().value;
+    p(this).previousResults.delete(result);
+    return result;
   }
 }

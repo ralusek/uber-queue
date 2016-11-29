@@ -1,7 +1,15 @@
 {
   "name": "uber-queue",
-  "author": "Tomas Savigliano",
   "version": "0.0.1",
+  "license": "MIT",
+  "main": "index.js",
+  "author": {
+    "name": "Tomas Savigliano"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ralusek/uber-queue"
+  },
   "dependencies": {
     "bluebird": "^3.4.6"
   }

@@ -9,7 +9,7 @@ const ERROR = CONSTANTS.ERROR;
 const RESOLVEE_TYPE = CONSTANTS.RESOLVEE_TYPE;
 
 const canResolve = Object.freeze({
-  [RESOLVEE_TYPE.FUNCTION]: (queueResolvee) => Promise.resolve(queueResolvee),
+  [RESOLVEE_TYPE.FUNCTION]: (queueResolvee) => Promise.resolve(),
   // [RESOLVEE_TYPE.QUEUE]: (resolvee) => (new Promise((resolve, reject) => {
   //   if (resolvee.isComplete()) return reject(ERROR.QUEUE_COMPLETE);
   //   resolve(resolvee.onNextOutbound());
@@ -17,8 +17,8 @@ const canResolve = Object.freeze({
 });
 
 const resolve = Object.freeze({
-  [RESOLVEE_TYPE.FUNCTION]: (queueResolvee) => {
-    return Promise.resolve(p(queueResolvee).resolvee());
+  [RESOLVEE_TYPE.FUNCTION]: (queueResolvee, previous) => {
+    return Promise.resolve(p(queueResolvee).resolvee(previous));
   },
   // [RESOLVEE_TYPE.QUEUE]: (resolvee) => Promise.resolve()
 });
@@ -65,7 +65,7 @@ class QueueResolvee {
   /**
    * Is responsibility of caller to call `canResolve` prior to using.
    */
-  resolve() {
+  resolve(previous) {
     if (!this.isMultiUse() && p(this).metadata.resolved.last.tried) {
       return Promise.reject(ERROR.NOT_MULTI_USE);
     }
@@ -84,7 +84,7 @@ class QueueResolvee {
       return result;
     };
 
-    return resolve[p(this).metadata.type](this)
+    return resolve[p(this).metadata.type](this, previous)
     .then(result => createResult({value: result}))
     .catch(err => createResult({error: err}));
   }
