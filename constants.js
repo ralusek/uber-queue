@@ -1,9 +1,5 @@
 'use strict';
 
-const DEFAULT = Object.freeze({
-  concurrency: 15
-});
-
 const PHASE = Object.freeze({
   PULL: 'pull',
   INBOUND: 'inbound',
@@ -14,6 +10,18 @@ const PHASE = Object.freeze({
 
 const ERROR = Object.freeze({
   CANT_PULL: ''
+});
+
+const DEFAULT = Object.freeze({
+  concurrency: Object.freeze({
+    [PHASE.RESOLVE]: 15
+  }),
+
+  waitMin: Object.freeze({
+    [PHASE.PULL]: 0,
+    [PHASE.RESOLVE]: 0,
+    [PHASE.PUSH]: 0
+  })
 });
 
 

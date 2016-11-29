@@ -26,9 +26,7 @@ function p(object) {
  */
 class UberQueue {
   constructor(config) {
-    config = config || {};
-
-    p(this).concurrency = config.concurrency || DEFAULT.concurrency;
+    this._configure(config);
 
     p(this).pullSource;
     // Maintains individual output queues per reader.
@@ -62,7 +60,7 @@ class UberQueue {
       [PHASE.RESOLVE]: new Set([
         () => p(this).queue[PHASE.INBOUND].size,
         () => !(p(this).paused.all || p(this).paused[PHASE.RESOLVE]),
-        () => p(this).metrics.resolving < p(this).concurrency
+        () => p(this).metrics.resolving < p(this).concurrency[PHASE.RESOLVE]
       ]),
       [PHASE.PUSH]: new Set([
         () => p(this).queue[PHASE.OUTBOUND].size,
@@ -155,8 +153,6 @@ class UberQueue {
     if (!callback) return;
     p(this).callbacks.onResult.add(callback);
 
-    this.refresh();
-
     // Return callback so it is easy to remove with `offResult`
     return callback;
   }
@@ -176,8 +172,6 @@ class UberQueue {
     return new Promise((resolve, reject) => {
       p(this).deferred.onceResult.add({resolve, reject});
     });
-
-    this.refresh();
   }
 
   /**
@@ -187,6 +181,8 @@ class UberQueue {
     const queueResolvee = new QueueResolvee(resolvee);
 
     p(this).queue[PHASE.INBOUND].add(queueResolvee);
+
+    p(this).metrics.totalQueued++;
 
     this.refresh();
   }
@@ -250,6 +246,15 @@ class UberQueue {
   /**
    *
    */
+  removeConditional(phase, conditional) {
+    p(this).conditionals[phas].delete(conditional);
+
+    this.refresh();
+  }
+
+  /**
+   *
+   */
   getMetadata() {
     return {
       metrics: Object.assign({
@@ -273,6 +278,8 @@ class UberQueue {
   resume(phase) {
     if (!phase) p(this).paused.all = false;
     if (p(this).paused[phase]) p(this).paused[phase] = false;
+
+    this.refresh();
   }
 
   /**
@@ -287,6 +294,29 @@ class UberQueue {
    */
   isComplete() {
     return p(this).state.complete;
+  }
+
+  /**
+   *
+   */
+  _configure(config) {
+    config = config || {};
+
+    // `concurrency` is how many items can be handled in parallel.
+    config.concurrency = config.concurrency || {};
+    p(this).concurrency = Object.freeze({
+      // [PHASE.PULL]: config.concurrency[PHASE.PULL] || DEFAULT.concurrency[PHASE.PULL],
+      [PHASE.RESOLVE]: config.concurrency[PHASE.RESOLVE] || DEFAULT.concurrency[PHASE.RESOLVE],
+      // [PHASE.PUSH]: config.concurrency[PHASE.PUSH] || DEFAULT.concurrency[PHASE.PUSH]
+    });
+
+    // TODO: implement
+    // `waitMin` is the minium wait time between handling.
+    config.waitMin = config.waitMin || {};
+    p(this).waitMin = Object.freeze({
+      [PHASE.PULL]: config.waitMin[PHASE.PULL] || DEFAULT.waitMin[PHASE.PULL],
+      [PHASE.RESOLVE]: config
+    });
   }
 
   /**
@@ -369,8 +399,6 @@ class UberQueue {
       p(this).metrics.resolving--;
       this.refresh();
     });
-    
-    this.refresh();
   }
 
 
