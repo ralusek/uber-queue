@@ -17,6 +17,8 @@ const DEFAULT = Object.freeze({
     [PHASE.RESOLVE]: 15
   }),
 
+  inactivityRefreshPeriod: 100,
+
   waitMin: Object.freeze({
     [PHASE.PULL]: 0,
     [PHASE.RESOLVE]: 0,

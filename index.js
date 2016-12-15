@@ -71,12 +71,15 @@ class UberQueue {
       [PHASE.PUSH]: new Set([
         () => p(this).queue[PHASE.OUTBOUND].size,
         () => !(p(this).paused.all || p(this).paused[PHASE.PUSH]),
+        // Ensure that there is at least some callback, otherwise don't push.
         () => (
-          p(this).callbacks.onResult.size ||
-          p(this).deferred.onceResult.size
+          p(this).callbacks.on[PHASE.PUSH].size ||
+          p(this).deferred.once[PHASE.PUSH].size
         )
       ])
     });
+
+    p(this).inactivityTimeout;
 
     p(this).paused = {
       all: false,
@@ -92,11 +95,18 @@ class UberQueue {
 
     // User References.
     p(this).callbacks = Object.freeze({
-      onResult: new Set()
+      on: Object.freeze({
+        refresh: new Set(),
+
+        [PHASE.PULL]: new Set(),
+        [PHASE.PUSH]: new Set()
+      })
     });
 
     p(this).deferred = Object.freeze({
-      onceResult: new Set()
+      once: {
+        [PHASE.PUSH]: new Set()
+      }
     })
 
     p(this).streams = new WeakMap();
@@ -136,7 +146,7 @@ class UberQueue {
       const queue = p(this).queueReaders.get(reader);
       const next = queue.values().next();
       if (next.done) {
-        return this.onceResult()
+        return this.once(PHASE.PUSH)
         .finally(() => resolve(this.nextInReaderQueue(reader)));
       }
 
@@ -155,28 +165,28 @@ class UberQueue {
   /**
    * V3 Complete.
    */
-  onResult(callback) {
+  on(phase, callback) {
     if (!callback) return;
-    p(this).callbacks.onResult.add(callback);
+    p(this).callbacks.on[phase].add(callback);
 
-    // Return callback so it is easy to remove with `offResult`
+    // Return callback so it is easy to remove with `off`
     return callback;
   }
 
   /**
    *
    */
-  offResult(callback) {
+  off(phase, callback) {
     if (!callback) return;
-    p(this).callbacks.onResult.delete(callback);
+    p(this).callbacks.on[phase].delete(callback);
   }
 
   /**
    * V3 Complete.
    */
-  onceResult() {
+  once(phase) {
     return new Promise((resolve, reject) => {
-      p(this).deferred.onceResult.add({resolve, reject});
+      p(this).deferred.once[phase].add({resolve, reject});
     });
   }
 
@@ -194,6 +204,16 @@ class UberQueue {
   }
 
   /**
+   * Dumps outbound queue. WARNING: does not fire callbacks.
+   */
+  flush() {
+    const queue = Array.from(p(this).queue[PHASE.OUTBOUND]);
+    p(this).queue[PHASE.OUTBOUND].clear();
+
+    return queue;
+  }
+
+  /**
    * Stream is created set to object mode. Everything written to the stream
    * will be treated as a resolvee and passed directly to UberQueue.add.
    */
@@ -207,7 +227,7 @@ class UberQueue {
       }
     });
 
-    const callback = p(this).onResult((err, result) => {
+    const callback = p(this).on(PHASE.PUSH, (err, result) => {
       if (err) return; // TODO handle this error properly.
       stream.push(result);
     });
@@ -225,7 +245,7 @@ class UberQueue {
     p(this).streams.delete(stream);
     stream.end(); // TODO make sure this is right.
 
-    this.offResult(callback);
+    this.off(PHASE.PUSH, callback);
   }
 
   /**
@@ -239,6 +259,19 @@ class UberQueue {
       this._pullNext();
       this._resolveNext();
       this._pushNext();
+
+      // Fire 'on refresh' events.
+      p(this).callbacks.on.refresh.forEach(callback => callback());
+
+      // Reset previous inactivity timeout, which will call refresh after a
+      // period of inactivity.
+      if (p(this).inactivityRefreshPeriod !== false) {
+        const currentTimeout = p(this).inactivityTimeout;
+        currentTimeout && clearTimeout(currentTimeout);
+        p(this).inactivityTimeout = setTimeout(() => {
+          this.refresh();
+        }, p(this).inactivityRefreshPeriod);
+      }
     });
   }
 
@@ -246,6 +279,7 @@ class UberQueue {
    *
    */
   addConditional(phase, conditional) {
+    console.log('Adding conditional', phase);
     p(this).conditionals[phase].add(conditional);
   }
 
@@ -316,6 +350,11 @@ class UberQueue {
       // [PHASE.PUSH]: config.concurrency[PHASE.PUSH] || DEFAULT.concurrency[PHASE.PUSH]
     });
 
+    // If everything has been resolved and pull conditinals have still not been
+    // met, nothing will force a refresh. This allows for a refresh to be forced
+    // after a MS minimum of inactivity. Can be integer (ms) or false.
+    p(this).inactivityRefreshPeriod = config.inactivityRefreshPeriod || DEFAULT.inactivityRefreshPeriod;
+
     // TODO: implement
     // TODO: add options for concurrent wait times.
     // `waitMin` is the minium wait time between handling.
@@ -366,6 +405,10 @@ class UberQueue {
     if (!this._canPull()) return;
 
     this.add(p(this).pullSource);
+
+    // Fire 'on pull' event.
+    p(this).callbacks.on[PHASE.PULL].forEach(callback => callback());
+    // p(this).deferred.once[PHASE.PUSH].forEach(deferred => deferred.resolve(result));
 
     // Refresh happens in `add`.
   }
@@ -426,14 +469,14 @@ class UberQueue {
 
     // Resolve callbacks and deferred.
     if (result.error) {
-      p(this).callbacks.onResult.forEach(callback => callback(result));
-      p(this).deferred.onceResult.forEach(deferred => deferred.reject(result));
+      p(this).callbacks.on[PHASE.PUSH].forEach(callback => callback(result));
+      p(this).deferred.once[PHASE.PUSH].forEach(deferred => deferred.reject(result));
     }
     else {
-      p(this).callbacks.onResult.forEach(callback => callback(null, result));
-      p(this).deferred.onceResult.forEach(deferred => deferred.resolve(result));
+      p(this).callbacks.on[PHASE.PUSH].forEach(callback => callback(null, result));
+      p(this).deferred.once[PHASE.PUSH].forEach(deferred => deferred.resolve(result));
     }
-    p(this).deferred.onceResult.clear();
+    p(this).deferred.once[PHASE.PUSH].clear();
 
     this.refresh();
   }
@@ -447,3 +490,5 @@ class UberQueue {
     return result;
   }
 }
+
+module.exports = UberQueue;
