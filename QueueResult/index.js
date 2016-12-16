@@ -15,8 +15,14 @@ function p(object) {
 class QueueResult {
   constructor(config) {
     config = config || {};
-    if (config.value) p(this).value = config.value;
-    else if (config.error)  p(this).error = config.error;
+    if (config.error) {
+      if (config.error.IS_QUEUE_RESULT) return config.error;
+      p(this).error = config.error;
+    }
+    else if (config.value) {
+      if (config.value.IS_QUEUE_RESULT) return config.value;
+      p(this).value = config.value;
+    }
 
     p(this).timeResolving = config.timeResolving;
     p(this).timeInQueue = config.timeInQueue;
@@ -27,6 +33,9 @@ class QueueResult {
       },
       'error': {
         get: function() { return p(this).error; }
+      },
+      'IS_QUEUE_RESULT': {
+        get: function() { return true; }
       }
     });
   }

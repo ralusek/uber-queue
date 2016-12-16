@@ -1,11 +1,19 @@
 'use strict';
 
-const PHASE = Object.freeze({
-  PULL: 'pull',
-  INBOUND: 'inbound',
-  RESOLVE: 'resolve',
-  OUTBOUND: 'outbound',
-  PUSH: 'push'
+const MODE = Object.freeze({
+  ACTIVE: 'active',
+  PASSIVE: 'passive'
+});
+
+const ACTION = Object.freeze({
+  REFRESH: 'refresh',
+  RESOLVE: 'resolve'
+});
+
+const EVENT = Object.freeze({
+  RESOLVED: 'resolved',
+  RESOLVING: 'resolving',
+  QUEUED: 'queued'
 });
 
 const ERROR = Object.freeze({
@@ -13,22 +21,22 @@ const ERROR = Object.freeze({
 });
 
 const DEFAULT = Object.freeze({
-  concurrency: Object.freeze({
-    [PHASE.RESOLVE]: 15
-  }),
+  mode: MODE.PASSIVE,
+
+  concurrency: 15,
 
   inactivityRefreshPeriod: 100,
 
-  waitMin: Object.freeze({
-    [PHASE.PULL]: 0,
-    [PHASE.RESOLVE]: 0,
-    [PHASE.PUSH]: 0
-  })
+  STREAM: () => {
+    objectMode: true
+  }
 });
 
 
 module.exports = Object.freeze({
+  MODE,
   DEFAULT,
-  PHASE,
+  ACTION,
+  EVENT,
   ERROR
 });

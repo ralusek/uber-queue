@@ -4,13 +4,15 @@ const Promise = require('bluebird');
 const Stream = require('stream');
 const utils = require('./utils');
 
-const QueueReader = require('./QueueReader');
 const QueueResolvee = require('./QueueResolvee');
 const QueueResult = require('./QueueResult');
+const QueueEmitter = require('./QueueEmitter');
 
 const CONSTANTS = require('./constants');
+const MODE = CONSTANTS.MODE;
 const DEFAULT = CONSTANTS.DEFAULT;
-const PHASE = CONSTANTS.PHASE;
+const ACTION = CONSTANTS.ACTION;
+const EVENT = CONSTANTS.EVENT;
 
 
 // This establishes a private namespace.
@@ -28,13 +30,16 @@ class UberQueue {
   constructor(config) {
     this._configure(config);
 
-    p(this).pullSource;
-    // Maintains individual output queues per reader.
-    p(this).queueReaders = new Map();
-
     p(this).metrics = {
       resolving: 0,
-      totalQueued: 0
+      totalQueued: 0,
+      successful: 0,
+      errored: 0
+    };
+
+    p(this).state = {
+      completed: false,
+      paused: false
     };
 
     // Use sets for more performant shift operation. At higher item counts,
@@ -42,12 +47,7 @@ class UberQueue {
     // `set.delete(set.values().next().value)` will outperform.
     // Additionally, concurrent queues mean that things will not necessarily be
     // dequeued from the beginning, for which Set provides O(1) delete.
-    p(this).queue = Object.freeze({
-      // Inbound queue should only have QueueResolvees in it.
-      [PHASE.INBOUND]: new Set(),
-      // Outbound queue should only have QueueResults in it.
-      [PHASE.OUTBOUND]: new Set()
-    });
+    p(this).queue = new Set(); // Queue will consist only of QueueResolvees.
 
     // Previous results to feed into resolvees if available. There will be up to
     // `concurrency.resolving` amount of times a resolvee will be called without
@@ -56,178 +56,182 @@ class UberQueue {
     p(this).previousResults = new Set();
 
 
-    // Conditionals to see if can progress inbound, resolving, and outbound.
+    // Conditionals to see if various Actions can be performed.
     // Additional conditionals can be set by the user.
     p(this).conditionals = Object.freeze({
-      [PHASE.PULL]: new Set([
-        () => !!p(this).pullSource,
-        () => !(p(this).paused.all || p(this).paused[PHASE.PULL])
+      [ACTION.REFRESH]: new Set([
+        () => !((p(this).mode === MODE.ACTIVE) && !p(this).emitter.isAwaitingNext(EVENT.RESOLVED))
       ]),
-      [PHASE.RESOLVE]: new Set([
-        () => p(this).queue[PHASE.INBOUND].size,
-        () => !(p(this).paused.all || p(this).paused[PHASE.RESOLVE]),
-        () => p(this).metrics.resolving < p(this).concurrency[PHASE.RESOLVE]
-      ]),
-      [PHASE.PUSH]: new Set([
-        () => p(this).queue[PHASE.OUTBOUND].size,
-        () => !(p(this).paused.all || p(this).paused[PHASE.PUSH]),
-        // Ensure that there is at least some callback, otherwise don't push.
-        () => (
-          p(this).callbacks.on[PHASE.PUSH].size ||
-          p(this).deferred.once[PHASE.PUSH].size
-        )
+      [ACTION.RESOLVE]: new Set([
+        () => !!p(this).queue.size,
+        () => !p(this).state.paused,
+        () => p(this).metrics.resolving < p(this).concurrency
       ])
     });
 
     p(this).inactivityTimeout;
 
-    p(this).paused = {
-      all: false,
-      [PHASE.PULL]: false,
-      [PHASE.RESOLVE]: false,
-      [PHASE.PUSH]: false
-    };
-
-    p(this).state = {
-      completed: false
-    };
-
 
     // User References.
-    p(this).callbacks = Object.freeze({
-      on: Object.freeze({
-        refresh: new Set(),
-
-        [PHASE.PULL]: new Set(),
-        [PHASE.PUSH]: new Set()
-      })
-    });
-
-    p(this).deferred = Object.freeze({
-      once: {
-        [PHASE.PUSH]: new Set()
-      }
-    })
+    p(this).emitter = new QueueEmitter();
 
     p(this).streams = new WeakMap();
+
+    // Previous promise returned from `next`.
+    p(this).lastNext = null;
+
+    // Is set when the queue is empty and the resolver is waiting for an entry.
+    p(this).deferredEmptyQueueChecker = null;
+
+    this.refresh();
   }
 
+
   /**
-   *
+   * Returns the Version of UberQueue from the package.json. Can be used for
+   * compatibility checks.
    */
   getVersion() {
     return utils.getUQVersion();
   }
 
+
   /**
-   * V3 Complete.
-   * Accepts function or queue.
+   * Subscribe to the output of another UberQueue.
    */
-  setPullSource(source) {
-    p(this).pullSource = source;
+  subscribe(queue) {
+    if (!queue || !queue.getVersion()) throw new Error('UberQueue.subscribe expects an instance of UberQueue.');
+    queue.on(EVENT.RESOLVED, (error, result) => this.resolve(error || result));
+  }
+
+
+  /**
+   * Adds item to queue. Item will be resolved according to QueueResolvee's
+   * handling of the type provided.
+   * 
+   * Functions will be called as a promise resolution, and be passed the previous
+   * queue result if available.
+   *
+   * QueueResults will be resolved or rejected depending on their error status.
+   *
+   * Anything else is considered wild and resolved as a promise using
+   * `Promise.resolve()`.
+   */
+  resolve(resolvee, returnResolvee) {
+    const queueResolvee = new QueueResolvee(resolvee);
+
+    p(this).queue.add(queueResolvee);
+
+    p(this).metrics.totalQueued++;
+    p(this).emitter.trigger(EVENT.QUEUED, null, resolvee);
+
+    // Use callback because synchronosity/blocking required.
+    queueResolvee.once(EVENT.RESOLVING, (err, content) => {
+      p(this).queue.delete(queueResolvee);
+      p(this).metrics.resolving++;
+    });
+
+    // Use callback because synchronosity/blocking required.
+    queueResolvee.once(EVENT.RESOLVED, (err, content) => {
+      const queueResult = err || content;
+      // Add to previous results list to pass into subsequent resolvees.
+      p(this).previousResults.add(queueResult);
+
+      if (err) {
+        p(this).emitter.trigger(EVENT.RESOLVED, queueResult);
+        p(this).metrics.errored++;
+      }
+      else {
+        p(this).emitter.trigger(EVENT.RESOLVED, null, queueResult);
+        p(this).metrics.successful++;
+      }
+      p(this).metrics.resolving--;
+      this.refresh();
+    });
 
     this.refresh();
+
+    return returnResolvee === true ? queueResolvee :
+        queueResolvee.once(EVENT.RESOLVED);
   }
 
+
   /**
+   * This will retrieve the next available value, where each subsequent call
+   * to `next` will retrieve subsequent values. For example, 2 calls to `next`
+   * immediately after one another will have the next available result passed
+   * to the first promise, with the next available result after that passed to
+   * the second.
    *
+   * ACTIVE MODE NOTE:
+   * If the UberQueue is in Active Mode, usage of `next` is the ONLY way to
+   * make the queue resolve its items. Resolution of items will only happen so
+   * long as there is a backlog of calls to `next` which are awaiting their
+   * resolved queue item.
    */
-  newQueueReader() {
-    const reader = new QueueReader(this);
-    p(this).queueReaders.set(reader, new Set());
-    return reader;
+  next(event) {
+    const promise = p(this).emitter.next(event || EVENT.RESOLVED);
+
+    this.refresh();
+
+    return promise
+    .finally(() => this.refresh());
   }
 
-  /**
-   *
-   */
-  nextInReaderQueue(reader) {
-    return new Promise((resolve, reject) => {
-      const queue = p(this).queueReaders.get(reader);
-      const next = queue.values().next();
-      if (next.done) {
-        return this.once(PHASE.PUSH)
-        .finally(() => resolve(this.nextInReaderQueue(reader)));
-      }
-
-      queue.delete(next.value);
-      next.value.error ? reject(next.value) : resolve(next.value);
-    });
-  }
 
   /**
-   * V3 Complete.
+   * Will have the callback called with the next event triggered's event response.
+   * Most common case is with event EVENT.RESOLVED, for getting the next resolved
+   * items in the queue.
    */
-  removeQueueReader(reader) {
-    p(this).queueReaders.delete(reader);
-  }
-
-  /**
-   * V3 Complete.
-   */
-  on(phase, callback) {
+  on(event, callback) {
     if (!callback) return;
-    p(this).callbacks.on[phase].add(callback);
+    p(this).emitter.on(event, callback);
 
     // Return callback so it is easy to remove with `off`
     return callback;
   }
 
+
+  /**
+   * Same as `on`, but removes the listener after it is called once.
+   * Returns a promise in addition to accepting a callback.
+   */
+  once(event, callback) {
+    return p(this).emitter.once(event, callback);
+  }
+
+
+  /**
+   * Removes a callback or promise generated by `next`, `on` or `once`.
+   */
+  off(event, callbackOrPromise) {
+    p(this).emitter.off(event, callbackOrPromise);
+  }
+
+  
+
   /**
    *
    */
-  off(phase, callback) {
-    if (!callback) return;
-    p(this).callbacks.on[phase].delete(callback);
-  }
+  toStream(streamConfig) {
+    streamConfig = streamConfig || {};
 
-  /**
-   * V3 Complete.
-   */
-  once(phase) {
-    return new Promise((resolve, reject) => {
-      p(this).deferred.once[phase].add({resolve, reject});
-    });
-  }
+    const stream = new Stream.Duplex(
+      Object.assign(
+        DEFAULT.STREAM(),
+        streamConfig,
+        {
+          write: (chunk, encoding, callback) => {
+            // Add chunk to queue.
+            this.resolve(chunk);
+            callback();
+          }
+        }
+      )
+    );
 
-  /**
-   * Adds resolvee to inbound.
-   */
-  add(resolvee) {
-    const queueResolvee = new QueueResolvee(resolvee);
-
-    p(this).queue[PHASE.INBOUND].add(queueResolvee);
-
-    p(this).metrics.totalQueued++;
-
-    this.refresh();
-  }
-
-  /**
-   * Dumps outbound queue. WARNING: does not fire callbacks.
-   */
-  flush() {
-    const queue = Array.from(p(this).queue[PHASE.OUTBOUND]);
-    p(this).queue[PHASE.OUTBOUND].clear();
-
-    return queue;
-  }
-
-  /**
-   * Stream is created set to object mode. Everything written to the stream
-   * will be treated as a resolvee and passed directly to UberQueue.add.
-   */
-  toStream() {
-    const stream = new Stream.Duplex({
-      objectMode: true,
-      write: (chunk, encoding, callback) => {
-        // Add chunk to queue.
-        this.add(chunk)
-        callback();
-      }
-    });
-
-    const callback = p(this).on(PHASE.PUSH, (err, result) => {
+    const callback = p(this).on(EVENT.RESOLVED, (err, result) => {
       if (err) return; // TODO handle this error properly.
       stream.push(result);
     });
@@ -245,7 +249,7 @@ class UberQueue {
     p(this).streams.delete(stream);
     stream.end(); // TODO make sure this is right.
 
-    this.off(PHASE.PUSH, callback);
+    this.off(EVENT.RESOLVED, callback);
   }
 
   /**
@@ -255,13 +259,13 @@ class UberQueue {
    * to complete will be handled in a subsequent `refresh`.
    */
   refresh() {
+    if (!this._canRefresh()) return;
+
     setTimeout(() => {
-      this._pullNext();
       this._resolveNext();
-      this._pushNext();
 
       // Fire 'on refresh' events.
-      p(this).callbacks.on.refresh.forEach(callback => callback());
+      p(this).emitter.trigger('refresh');
 
       // Reset previous inactivity timeout, which will call refresh after a
       // period of inactivity.
@@ -272,22 +276,25 @@ class UberQueue {
           this.refresh();
         }, p(this).inactivityRefreshPeriod);
       }
-    });
+    }, 100);
+  }
+
+  _canRefresh() {
+    return this._allConditionals(ACTION.REFRESH);
   }
 
   /**
    *
    */
-  addConditional(phase, conditional) {
-    console.log('Adding conditional', phase);
-    p(this).conditionals[phase].add(conditional);
+  addConditional(action, conditional) {
+    p(this).conditionals[action].add(conditional);
   }
 
   /**
    *
    */
-  removeConditional(phase, conditional) {
-    p(this).conditionals[phas].delete(conditional);
+  removeConditional(action, conditional) {
+    p(this).conditionals[action].delete(conditional);
 
     this.refresh();
   }
@@ -297,9 +304,10 @@ class UberQueue {
    */
   getMetadata() {
     return {
+      completed: p(this).state.completed,
+      paused: p(this).state.paused,
       metrics: Object.assign({
-        inbound: p(this).queue[PHASE.INBOUND].size,
-        outbound: p(this).queue[PHASE.OUTBOUND].size
+        queued: p(this).queue.size
       }, p(this).metrics)
     };
   }
@@ -307,33 +315,25 @@ class UberQueue {
   /**
    *
    */
-  pause(phase) {
-    if (!phase) p(this).paused.all = true;
-    if (p(this).paused[phase]) p(this).paused[phase] = true;
+  pause() {
+    p(this).state.paused = true;
   }
 
-   /**
+  /**
    *
    */
-  resume(phase) {
-    if (!phase) p(this).paused.all = false;
-    if (p(this).paused[phase]) p(this).paused[phase] = false;
+  resume() {
+    p(this).state.paused = false;
 
     this.refresh();
   }
 
   /**
-   * TODO: implement
+   *
    */
   setComplete() {
-    p(this).state.complete = true;
-  }
-
-  /**
-   * TODO: implement
-   */
-  isComplete() {
-    return p(this).state.complete;
+    p(this).state.completed = true;
+    p(this).emitter.trigger('completed');
   }
 
   /**
@@ -343,33 +343,21 @@ class UberQueue {
     config = config || {};
 
     // `concurrency` is how many items can be handled in parallel.
-    config.concurrency = config.concurrency || {};
-    p(this).concurrency = Object.freeze({
-      // [PHASE.PULL]: config.concurrency[PHASE.PULL] || DEFAULT.concurrency[PHASE.PULL],
-      [PHASE.RESOLVE]: config.concurrency[PHASE.RESOLVE] || DEFAULT.concurrency[PHASE.RESOLVE],
-      // [PHASE.PUSH]: config.concurrency[PHASE.PUSH] || DEFAULT.concurrency[PHASE.PUSH]
-    });
+    p(this).concurrency = config.concurrency || DEFAULT.concurrency;
+
+    p(this).mode = config.mode || DEFAULT.mode;
 
     // If everything has been resolved and pull conditinals have still not been
     // met, nothing will force a refresh. This allows for a refresh to be forced
     // after a MS minimum of inactivity. Can be integer (ms) or false.
     p(this).inactivityRefreshPeriod = config.inactivityRefreshPeriod || DEFAULT.inactivityRefreshPeriod;
-
-    // TODO: implement
-    // TODO: add options for concurrent wait times.
-    // `waitMin` is the minium wait time between handling.
-    config.waitMin = config.waitMin || {};
-    p(this).waitMin = Object.freeze({
-      [PHASE.PULL]: config.waitMin[PHASE.PULL] || DEFAULT.waitMin[PHASE.PULL],
-      [PHASE.RESOLVE]: config
-    });
   }
 
   /**
    *
    */
-  _allConditionals(conditionals) {
-    const values = conditionals.values();
+  _allConditionals(action) {
+    const values = p(this).conditionals[action].values();
     let current;
     while (!(current = values.next()).done) {
       if (!current.value(this)) return false;
@@ -380,105 +368,29 @@ class UberQueue {
   /**
    *
    */
-  _canPull() {
-    return this._allConditionals(p(this).conditionals[PHASE.PULL]);
-  }
-
-  /**
-   *
-   */
   _canResolve() {
-    return this._allConditionals(p(this).conditionals[PHASE.RESOLVE]);
+    return this._allConditionals(ACTION.RESOLVE);
   }
-
-  /**
-   *
-   */
-  _canPush() {
-    return this._allConditionals(p(this).conditionals[PHASE.PUSH])
-  }
-
-  /**
-   *
-   */
-  _pullNext() {
-    if (!this._canPull()) return;
-
-    this.add(p(this).pullSource);
-
-    // Fire 'on pull' event.
-    p(this).callbacks.on[PHASE.PULL].forEach(callback => callback());
-    // p(this).deferred.once[PHASE.PUSH].forEach(deferred => deferred.resolve(result));
-
-    // Refresh happens in `add`.
-  }
-
 
   /**
    * V3 complete w/todo
    */
   _resolveNext() {
-    if (!this._canResolve()) return;
-
-    const inboundQueue = p(this).queue[PHASE.INBOUND];
+    if (!this._canResolve()) {
+      // Handle cases where there is nothing queued.
+      if (!p(this).queue.size && !p(this).deferredEmptyQueueChecker) {
+        p(this).deferredEmptyQueueChecker = p(this).emitter.once(EVENT.QUEUED)
+        .finally(() => {
+          p(this).deferredEmptyQueueChecker = null;
+          this._resolveNext()
+        });
+      }
+      return;
+    }
     
-    const resolvee = inboundQueue.values().next().value;
+    const resolvee = p(this).queue.values().next().value;
 
-    // Ensure resolvee is capable of resolving. If not, remove it from inbound
-    // and refresh.
-    if (!resolvee.canResolve()) {
-      inboundQueue.delete(resolvee);
-      return this.refresh();
-    }
-
-    // If resolvee is not multi-use, remove from inbound.
-    if (!resolvee.isMultiUse()) inboundQueue.delete(resolvee);
-
-    p(this).metrics.resolving++;
-    
-    resolvee.resolve(this._shiftPreviousResult())
-    .tap(queueResult => {
-      // Add to primary outbound queue.
-      p(this).queue[PHASE.OUTBOUND].add(queueResult);
-
-      // Add to previous results list to pass into subsequent resolvees.
-      p(this).previousResults.add(queueResult);
-
-      // Add to individual reader outbound queues.
-      p(this).queueReaders.forEach((queue) => {
-        queue.add(queueResult);
-      });
-    })
-    .finally(() => {
-      p(this).metrics.resolving--;
-      this.refresh();
-    });
-  }
-
-
-  /**
-   * Pushes the result from the queue to any listeners.
-   */
-  _pushNext() {
-    if (!this._canPush()) return;
-
-    const queue = p(this).queue[PHASE.OUTBOUND];
-
-    const result = queue.values().next().value;
-    queue.delete(result);
-
-    // Resolve callbacks and deferred.
-    if (result.error) {
-      p(this).callbacks.on[PHASE.PUSH].forEach(callback => callback(result));
-      p(this).deferred.once[PHASE.PUSH].forEach(deferred => deferred.reject(result));
-    }
-    else {
-      p(this).callbacks.on[PHASE.PUSH].forEach(callback => callback(null, result));
-      p(this).deferred.once[PHASE.PUSH].forEach(deferred => deferred.resolve(result));
-    }
-    p(this).deferred.once[PHASE.PUSH].clear();
-
-    this.refresh();
+    resolvee.resolve(this._shiftPreviousResult());
   }
 
   /**
@@ -490,5 +402,9 @@ class UberQueue {
     return result;
   }
 }
+
+Object.freeze(Object.assign(UberQueue, {ACTION, MODE, EVENT}));
+
+
 
 module.exports = UberQueue;
