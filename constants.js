@@ -1,11 +1,7 @@
 'use strict';
 
 const PHASE = Object.freeze({
-  PULL: 'pull',
-  INBOUND: 'inbound',
-  RESOLVE: 'resolve',
-  OUTBOUND: 'outbound',
-  PUSH: 'push'
+  RESOLVE: 'resolve'
 });
 
 const ERROR = Object.freeze({
@@ -13,9 +9,7 @@ const ERROR = Object.freeze({
 });
 
 const DEFAULT = Object.freeze({
-  concurrency: Object.freeze({
-    [PHASE.RESOLVE]: 15
-  }),
+  concurrency: 15,
 
   inactivityRefreshPeriod: 100,
 

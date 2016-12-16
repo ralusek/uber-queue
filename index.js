@@ -7,6 +7,7 @@ const utils = require('./utils');
 const QueueReader = require('./QueueReader');
 const QueueResolvee = require('./QueueResolvee');
 const QueueResult = require('./QueueResult');
+const QueueEmitter = require('./QueueEmitter');
 
 const CONSTANTS = require('./constants');
 const DEFAULT = CONSTANTS.DEFAULT;
@@ -28,13 +29,16 @@ class UberQueue {
   constructor(config) {
     this._configure(config);
 
-    p(this).pullSource;
-    // Maintains individual output queues per reader.
-    p(this).queueReaders = new Map();
-
     p(this).metrics = {
       resolving: 0,
-      totalQueued: 0
+      totalQueued: 0,
+      successful: 0,
+      errored: 0
+    };
+
+    p(this).state = {
+      completed: false,
+      paused: false
     };
 
     // Use sets for more performant shift operation. At higher item counts,
@@ -42,12 +46,7 @@ class UberQueue {
     // `set.delete(set.values().next().value)` will outperform.
     // Additionally, concurrent queues mean that things will not necessarily be
     // dequeued from the beginning, for which Set provides O(1) delete.
-    p(this).queue = Object.freeze({
-      // Inbound queue should only have QueueResolvees in it.
-      [PHASE.INBOUND]: new Set(),
-      // Outbound queue should only have QueueResults in it.
-      [PHASE.OUTBOUND]: new Set()
-    });
+    p(this).queue = new Set(); // Queue will consist only of QueueResolvees.
 
     // Previous results to feed into resolvees if available. There will be up to
     // `concurrency.resolving` amount of times a resolvee will be called without
@@ -56,60 +55,23 @@ class UberQueue {
     p(this).previousResults = new Set();
 
 
-    // Conditionals to see if can progress inbound, resolving, and outbound.
+    // Conditionals to see if can resolve.
     // Additional conditionals can be set by the user.
-    p(this).conditionals = Object.freeze({
-      [PHASE.PULL]: new Set([
-        () => !!p(this).pullSource,
-        () => !(p(this).paused.all || p(this).paused[PHASE.PULL])
-      ]),
-      [PHASE.RESOLVE]: new Set([
-        () => p(this).queue[PHASE.INBOUND].size,
-        () => !(p(this).paused.all || p(this).paused[PHASE.RESOLVE]),
-        () => p(this).metrics.resolving < p(this).concurrency[PHASE.RESOLVE]
-      ]),
-      [PHASE.PUSH]: new Set([
-        () => p(this).queue[PHASE.OUTBOUND].size,
-        () => !(p(this).paused.all || p(this).paused[PHASE.PUSH]),
-        // Ensure that there is at least some callback, otherwise don't push.
-        () => (
-          p(this).callbacks.on[PHASE.PUSH].size ||
-          p(this).deferred.once[PHASE.PUSH].size
-        )
-      ])
-    });
+    p(this).conditionals = new Set([
+      () => p(this).queue.size,
+      () => !p(this).state.paused,
+      () => p(this).metrics.resolving < p(this).concurrency
+    ]);
 
     p(this).inactivityTimeout;
 
-    p(this).paused = {
-      all: false,
-      [PHASE.PULL]: false,
-      [PHASE.RESOLVE]: false,
-      [PHASE.PUSH]: false
-    };
-
-    p(this).state = {
-      completed: false
-    };
-
 
     // User References.
-    p(this).callbacks = Object.freeze({
-      on: Object.freeze({
-        refresh: new Set(),
-
-        [PHASE.PULL]: new Set(),
-        [PHASE.PUSH]: new Set()
-      })
-    });
-
-    p(this).deferred = Object.freeze({
-      once: {
-        [PHASE.PUSH]: new Set()
-      }
-    })
+    p(this).emitter = new QueueEmitter();
 
     p(this).streams = new WeakMap();
+
+    this.refresh();
   }
 
   /**
@@ -121,53 +83,10 @@ class UberQueue {
 
   /**
    * V3 Complete.
-   * Accepts function or queue.
-   */
-  setPullSource(source) {
-    p(this).pullSource = source;
-
-    this.refresh();
-  }
-
-  /**
-   *
-   */
-  newQueueReader() {
-    const reader = new QueueReader(this);
-    p(this).queueReaders.set(reader, new Set());
-    return reader;
-  }
-
-  /**
-   *
-   */
-  nextInReaderQueue(reader) {
-    return new Promise((resolve, reject) => {
-      const queue = p(this).queueReaders.get(reader);
-      const next = queue.values().next();
-      if (next.done) {
-        return this.once(PHASE.PUSH)
-        .finally(() => resolve(this.nextInReaderQueue(reader)));
-      }
-
-      queue.delete(next.value);
-      next.value.error ? reject(next.value) : resolve(next.value);
-    });
-  }
-
-  /**
-   * V3 Complete.
-   */
-  removeQueueReader(reader) {
-    p(this).queueReaders.delete(reader);
-  }
-
-  /**
-   * V3 Complete.
    */
   on(phase, callback) {
     if (!callback) return;
-    p(this).callbacks.on[phase].add(callback);
+    p(this).emitter.on(phase, callback);
 
     // Return callback so it is easy to remove with `off`
     return callback;
@@ -176,41 +95,28 @@ class UberQueue {
   /**
    *
    */
-  off(phase, callback) {
-    if (!callback) return;
-    p(this).callbacks.on[phase].delete(callback);
+  off(phase, callbackOrPromise) {
+    p(this).emitter.off(phase, callbackOrPromise);
   }
 
   /**
    * V3 Complete.
    */
   once(phase) {
-    return new Promise((resolve, reject) => {
-      p(this).deferred.once[phase].add({resolve, reject});
-    });
+    return p(this).emitter.once(phase);
   }
 
   /**
    * Adds resolvee to inbound.
    */
-  add(resolvee) {
+  resolve(resolvee) {
     const queueResolvee = new QueueResolvee(resolvee);
 
-    p(this).queue[PHASE.INBOUND].add(queueResolvee);
+    p(this).queue.add(queueResolvee);
 
     p(this).metrics.totalQueued++;
 
     this.refresh();
-  }
-
-  /**
-   * Dumps outbound queue. WARNING: does not fire callbacks.
-   */
-  flush() {
-    const queue = Array.from(p(this).queue[PHASE.OUTBOUND]);
-    p(this).queue[PHASE.OUTBOUND].clear();
-
-    return queue;
   }
 
   /**
@@ -222,12 +128,12 @@ class UberQueue {
       objectMode: true,
       write: (chunk, encoding, callback) => {
         // Add chunk to queue.
-        this.add(chunk)
+        this.resolve(chunk);
         callback();
       }
     });
 
-    const callback = p(this).on(PHASE.PUSH, (err, result) => {
+    const callback = p(this).on(PHASE.RESOLVE, (err, result) => {
       if (err) return; // TODO handle this error properly.
       stream.push(result);
     });
@@ -245,7 +151,7 @@ class UberQueue {
     p(this).streams.delete(stream);
     stream.end(); // TODO make sure this is right.
 
-    this.off(PHASE.PUSH, callback);
+    this.off(PHASE.RESOLVE, callback);
   }
 
   /**
@@ -256,12 +162,10 @@ class UberQueue {
    */
   refresh() {
     setTimeout(() => {
-      this._pullNext();
       this._resolveNext();
-      this._pushNext();
 
       // Fire 'on refresh' events.
-      p(this).callbacks.on.refresh.forEach(callback => callback());
+      p(this).emitter.trigger('refresh');
 
       // Reset previous inactivity timeout, which will call refresh after a
       // period of inactivity.
@@ -278,16 +182,15 @@ class UberQueue {
   /**
    *
    */
-  addConditional(phase, conditional) {
-    console.log('Adding conditional', phase);
-    p(this).conditionals[phase].add(conditional);
+  addConditional(conditional) {
+    p(this).conditionals.add(conditional);
   }
 
   /**
    *
    */
-  removeConditional(phase, conditional) {
-    p(this).conditionals[phas].delete(conditional);
+  removeConditional(conditional) {
+    p(this).conditionals.delete(conditional);
 
     this.refresh();
   }
@@ -297,9 +200,10 @@ class UberQueue {
    */
   getMetadata() {
     return {
+      completed: p(this).state.completed,
+      paused: p(this).state.paused,
       metrics: Object.assign({
-        inbound: p(this).queue[PHASE.INBOUND].size,
-        outbound: p(this).queue[PHASE.OUTBOUND].size
+        queued: p(this).queue.size
       }, p(this).metrics)
     };
   }
@@ -307,33 +211,25 @@ class UberQueue {
   /**
    *
    */
-  pause(phase) {
-    if (!phase) p(this).paused.all = true;
-    if (p(this).paused[phase]) p(this).paused[phase] = true;
+  pause() {
+    p(this).state.paused = true;
   }
 
-   /**
+  /**
    *
    */
-  resume(phase) {
-    if (!phase) p(this).paused.all = false;
-    if (p(this).paused[phase]) p(this).paused[phase] = false;
+  resume() {
+    p(this).state.paused = false;
 
     this.refresh();
   }
 
   /**
-   * TODO: implement
+   *
    */
   setComplete() {
-    p(this).state.complete = true;
-  }
-
-  /**
-   * TODO: implement
-   */
-  isComplete() {
-    return p(this).state.complete;
+    p(this).state.completed = true;
+    p(this).emitter.trigger('completed');
   }
 
   /**
@@ -343,12 +239,7 @@ class UberQueue {
     config = config || {};
 
     // `concurrency` is how many items can be handled in parallel.
-    config.concurrency = config.concurrency || {};
-    p(this).concurrency = Object.freeze({
-      // [PHASE.PULL]: config.concurrency[PHASE.PULL] || DEFAULT.concurrency[PHASE.PULL],
-      [PHASE.RESOLVE]: config.concurrency[PHASE.RESOLVE] || DEFAULT.concurrency[PHASE.RESOLVE],
-      // [PHASE.PUSH]: config.concurrency[PHASE.PUSH] || DEFAULT.concurrency[PHASE.PUSH]
-    });
+    p(this).concurrency = config.concurrency || DEFAULT.concurrency;
 
     // If everything has been resolved and pull conditinals have still not been
     // met, nothing will force a refresh. This allows for a refresh to be forced
@@ -368,8 +259,8 @@ class UberQueue {
   /**
    *
    */
-  _allConditionals(conditionals) {
-    const values = conditionals.values();
+  _allConditionals() {
+    const values = p(this).conditionals.values();
     let current;
     while (!(current = values.next()).done) {
       if (!current.value(this)) return false;
@@ -380,105 +271,48 @@ class UberQueue {
   /**
    *
    */
-  _canPull() {
-    return this._allConditionals(p(this).conditionals[PHASE.PULL]);
-  }
-
-  /**
-   *
-   */
   _canResolve() {
-    return this._allConditionals(p(this).conditionals[PHASE.RESOLVE]);
+    return this._allConditionals();
   }
-
-  /**
-   *
-   */
-  _canPush() {
-    return this._allConditionals(p(this).conditionals[PHASE.PUSH])
-  }
-
-  /**
-   *
-   */
-  _pullNext() {
-    if (!this._canPull()) return;
-
-    this.add(p(this).pullSource);
-
-    // Fire 'on pull' event.
-    p(this).callbacks.on[PHASE.PULL].forEach(callback => callback());
-    // p(this).deferred.once[PHASE.PUSH].forEach(deferred => deferred.resolve(result));
-
-    // Refresh happens in `add`.
-  }
-
 
   /**
    * V3 complete w/todo
    */
   _resolveNext() {
     if (!this._canResolve()) return;
-
-    const inboundQueue = p(this).queue[PHASE.INBOUND];
     
-    const resolvee = inboundQueue.values().next().value;
+    const resolvee = p(this).queue.values().next().value;
 
     // Ensure resolvee is capable of resolving. If not, remove it from inbound
     // and refresh.
     if (!resolvee.canResolve()) {
-      inboundQueue.delete(resolvee);
+      p(this).queue.delete(resolvee);
       return this.refresh();
     }
 
     // If resolvee is not multi-use, remove from inbound.
-    if (!resolvee.isMultiUse()) inboundQueue.delete(resolvee);
+    if (!resolvee.isMultiUse()) p(this).queue.delete(resolvee);
 
     p(this).metrics.resolving++;
     
     resolvee.resolve(this._shiftPreviousResult())
     .tap(queueResult => {
-      // Add to primary outbound queue.
-      p(this).queue[PHASE.OUTBOUND].add(queueResult);
-
       // Add to previous results list to pass into subsequent resolvees.
       p(this).previousResults.add(queueResult);
 
-      // Add to individual reader outbound queues.
-      p(this).queueReaders.forEach((queue) => {
-        queue.add(queueResult);
-      });
+      if (queueResult.error) {
+        p(this).emitter.trigger(PHASE.RESOLVE, queueResult);
+        p(this).metrics.errored++;
+      }
+      else {
+        p(this).emitter.trigger(PHASE.RESOLVE, null, queueResult);
+        p(this).metrics.successful++;
+      }
     })
     .finally(() => {
       p(this).metrics.resolving--;
       this.refresh();
     });
-  }
-
-
-  /**
-   * Pushes the result from the queue to any listeners.
-   */
-  _pushNext() {
-    if (!this._canPush()) return;
-
-    const queue = p(this).queue[PHASE.OUTBOUND];
-
-    const result = queue.values().next().value;
-    queue.delete(result);
-
-    // Resolve callbacks and deferred.
-    if (result.error) {
-      p(this).callbacks.on[PHASE.PUSH].forEach(callback => callback(result));
-      p(this).deferred.once[PHASE.PUSH].forEach(deferred => deferred.reject(result));
-    }
-    else {
-      p(this).callbacks.on[PHASE.PUSH].forEach(callback => callback(null, result));
-      p(this).deferred.once[PHASE.PUSH].forEach(deferred => deferred.resolve(result));
-    }
-    p(this).deferred.once[PHASE.PUSH].clear();
-
-    this.refresh();
   }
 
   /**
@@ -490,5 +324,8 @@ class UberQueue {
     return result;
   }
 }
+
+UberQueue.QueueReader = QueueReader;
+
 
 module.exports = UberQueue;
