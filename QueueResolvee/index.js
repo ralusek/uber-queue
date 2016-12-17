@@ -1,30 +1,28 @@
 'use strict';
 
 const Promise = require('bluebird');
+const QueueEmitter = require('../QueueEmitter');
 const QueueResult = require('../QueueResult');
 const utils = require('./utils');
 
 const CONSTANTS = require('./constants');
+const EVENT = CONSTANTS.EVENT;
 const ERROR = CONSTANTS.ERROR;
 const RESOLVEE_TYPE = CONSTANTS.RESOLVEE_TYPE;
-
-const canResolve = Object.freeze({
-  [RESOLVEE_TYPE.FUNCTION]: (queueResolvee) => Promise.resolve(),
-  // [RESOLVEE_TYPE.QUEUE]: (resolvee) => (new Promise((resolve, reject) => {
-  //   if (resolvee.isComplete()) return reject(ERROR.QUEUE_COMPLETE);
-  //   resolve(resolvee.onNextOutbound());
-  // }))
-});
 
 const resolve = Object.freeze({
   [RESOLVEE_TYPE.FUNCTION]: (queueResolvee, previous) => {
     return Promise.resolve(p(queueResolvee).resolvee(previous));
   },
+  [RESOLVEE_TYPE.QUEUE_RESULT]: (queueResolvee, previous) => {
+    const result = p(queueResolvee).resolvee;
+    if (result.error) return Promise.reject(result);
+    return Promise.resolve(result);
+  },
+  [RESOLVEE_TYPE.WILD]: (queueResolvee, previous) => {
+    return Promise.resolve(p(queueResolvee).resolvee);
+  }
   // [RESOLVEE_TYPE.QUEUE]: (resolvee) => Promise.resolve()
-});
-
-const multiUse = Object.freeze({
-  [RESOLVEE_TYPE.FUNCTION]: false
 });
 
 
@@ -44,53 +42,64 @@ class QueueResolvee {
   constructor(resolvee) {
     p(this).metadata = {
       createdAt: Date.now(),
-      type: this._determineResolveeType(resolvee),
-      resolved: {
-        last: {
-          tried: null,
-          resolved: null
-        }
-      }
+      type: this._determineResolveeType(resolvee)
     };
+
+    p(this).emitter = new QueueEmitter();
 
     p(this).resolvee = resolvee;
 
-    p(this).lastResolvedAt;
+    p(this).result;
   }
 
-  canResolve() {
-    return canResolve[p(this).metadata.type](this);
-  }
 
   /**
    * Is responsibility of caller to call `canResolve` prior to using.
    */
   resolve(previous) {
-    if (!this.isMultiUse() && p(this).metadata.resolved.last.tried) {
-      return Promise.reject(ERROR.NOT_MULTI_USE);
-    }
-    const startedAt = p(this).metadata.resolved.last.tried = Date.now();
+    if (p(this).metadata.startedAt) return this._returnResult();
+    p(this).metadata.startedAt = Date.now();
+
+    p(this).emitter.trigger(EVENT.RESOLVING);
 
     const createResult = (result) => {
-      const lastQueued =
-          (this.isMultiUse() && p(this).metadata.resolved.last.resolved) ||
-          p(this).metadata.createdAt;
-      const resolvedAt = p(this).metadata.resolved.last.resolved = Date.now();
+      const resolvedAt = Date.now();
+      p(this).resolvedAt = resolvedAt;
+
       result = new QueueResult(Object.assign({
-        timeResolving: resolvedAt - startedAt,
-        timeInQueue: resolvedAt - lastQueued
+        timeResolving: resolvedAt - p(this).metadata.startedAt,
+        timeInQueue: resolvedAt - p(this).metadata.createdAt
       }, result));
 
       return result;
-    };
+    }
 
     return resolve[p(this).metadata.type](this, previous)
-    .then(result => createResult({value: result}))
-    .catch(err => createResult({error: err}));
+    .then(result => {
+      result = createResult({value: result});
+      p(this).emitter.trigger(EVENT.RESOLVED, null, result);
+      p(this).result = result;
+      return this._returnResult();
+    })
+    .catch(err => {
+      err = createResult({error: err});
+      p(this).emitter.trigger(EVENT.RESOLVED, err);
+      p(this).result = err;
+      return this._returnResult();
+    });
   }
 
-  isMultiUse() {
-    return multiUse[p(this).metadata.type]
+  once(event, callback) {
+    return p(this).emitter.once(event || EVENT.RESOLVED, callback);
+  }
+
+  /**
+   *
+   */
+  _returnResult() {
+    if (!p(this).result) return this.once();
+    if (p(this).result.error) return Promise.reject(p(this).result);
+    return Promise.resolve(p(this).result);
   }
 
   /**
@@ -99,8 +108,9 @@ class QueueResolvee {
   _determineResolveeType(resolvee) {
     if (!resolvee) throw new Error(ERROR.NOT_VALID_TYPE(resolvee));
     if (utils.isFunction(resolvee)) return RESOLVEE_TYPE.FUNCTION;
+    if (resolvee.IS_QUEUE_RESULT) return RESOLVEE_TYPE.QUEUE_RESULT;
 
-    throw new Error(ERROR.NOT_VALID_TYPE(resolvee));
+    return RESOLVEE_TYPE.WILD;
   }
 }
 
