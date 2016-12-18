@@ -39,6 +39,18 @@ class QueueResult {
       }
     });
   }
+
+  getMetadata() {
+    return {
+      timeResolving: p(this).timeResolving,
+      timeInQueue: p(this).timeInQueue
+    };
+  }
+
+  resolve() {
+    if (p(this).error) return Promise.reject(this);
+    return Promise.resolve(this);
+  }
 }
 
 module.exports = QueueResult;

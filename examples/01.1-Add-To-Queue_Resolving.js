@@ -28,3 +28,8 @@ queue.resolve('hello');
 // storing arbitrary values can be useful are addressed in the documentation
 // regarding Subscribing.
 
+
+setTimeout(() => {
+  console.log(JSON.stringify(queue.getMetadata(), null, 2));
+}, 2500);
+

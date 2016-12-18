@@ -33,8 +33,36 @@ class UberQueue {
     p(this).metrics = {
       resolving: 0,
       totalQueued: 0,
-      successful: 0,
-      errored: 0
+      success: 0,
+      error: 0,
+      timeInQueue: {
+        average: {
+          success: 0,
+          error: 0
+        },
+        max: {
+          success: 0,
+          error: 0
+        },
+        min: {
+          success: Infinity,
+          error: Infinity
+        }
+      },
+      timeResolving: {
+        average: {
+          success: 0,
+          error: 0
+        },
+        max: {
+          success: 0,
+          error: 0
+        },
+        min: {
+          success: Infinity,
+          error: Infinity
+        }
+      }
     };
 
     p(this).state = {
@@ -137,15 +165,12 @@ class UberQueue {
       // Add to previous results list to pass into subsequent resolvees.
       p(this).previousResults.add(queueResult);
 
-      if (err) {
-        p(this).emitter.trigger(EVENT.RESOLVED, queueResult);
-        p(this).metrics.errored++;
-      }
-      else {
-        p(this).emitter.trigger(EVENT.RESOLVED, null, queueResult);
-        p(this).metrics.successful++;
-      }
+      if (err) p(this).emitter.trigger(EVENT.RESOLVED, queueResult);
+      else p(this).emitter.trigger(EVENT.RESOLVED, null, queueResult);
       p(this).metrics.resolving--;
+
+      this._calculateMetricsFromResult(queueResult);
+
       this.refresh();
     });
 
@@ -303,6 +328,7 @@ class UberQueue {
    *
    */
   getMetadata() {
+    // TODO: make entire p(this).metrics returned immutable.
     return {
       completed: p(this).state.completed,
       paused: p(this).state.paused,
@@ -400,6 +426,30 @@ class UberQueue {
     const result = p(this).previousResults.values().next().value;
     p(this).previousResults.delete(result);
     return result;
+  }
+
+  /**
+   *
+   */
+  _calculateMetricsFromResult(result) {
+    const metrics = p(this).metrics;
+    const metadata = result.getMetadata();
+    const inQueue = metadata.timeInQueue;
+    const resolving = metadata.timeResolving;
+
+    const outcome = result.error ? 'error' : 'success';
+
+    // Calculate min.
+    if (inQueue < metrics.timeInQueue.min[outcome]) metrics.timeInQueue.min[outcome] = inQueue;
+    if (resolving < metrics.timeResolving.min[outcome]) metrics.timeResolving.min[outcome] = resolving;
+    // Calculate max.
+    if (inQueue > metrics.timeInQueue.max[outcome]) metrics.timeInQueue.max[outcome] = inQueue;
+    if (resolving > metrics.timeResolving.max[outcome]) metrics.timeResolving.max[outcome] = resolving;
+    // Calculate average.
+    metrics.timeInQueue.average[outcome] = ((metrics.timeInQueue.average[outcome] * metrics[outcome]) + inQueue) / (metrics[outcome] + 1); 
+    metrics.timeResolving.average[outcome] = ((metrics.timeResolving.average[outcome] * metrics[outcome]) + resolving) / (metrics[outcome] + 1); 
+
+    metrics[outcome]++;
   }
 }
 

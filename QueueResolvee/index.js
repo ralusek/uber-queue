@@ -15,14 +15,11 @@ const resolve = Object.freeze({
     return Promise.resolve(p(queueResolvee).resolvee(previous));
   },
   [RESOLVEE_TYPE.QUEUE_RESULT]: (queueResolvee, previous) => {
-    const result = p(queueResolvee).resolvee;
-    if (result.error) return Promise.reject(result);
-    return Promise.resolve(result);
+    return p(queueResolvee).resolvee.resolve();
   },
   [RESOLVEE_TYPE.WILD]: (queueResolvee, previous) => {
     return Promise.resolve(p(queueResolvee).resolvee);
   }
-  // [RESOLVEE_TYPE.QUEUE]: (resolvee) => Promise.resolve()
 });
 
 
