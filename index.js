@@ -30,6 +30,8 @@ class UberQueue {
   constructor(config) {
     this._configure(config);
 
+    p(this).createdAt = Date.now();
+
     p(this).metrics = {
       resolving: 0,
       totalQueued: 0,
@@ -62,6 +64,10 @@ class UberQueue {
           success: Infinity,
           error: Infinity
         }
+      },
+      resolvedPerSecond: {
+        success: 0,
+        error: 0
       }
     };
 
@@ -450,6 +456,10 @@ class UberQueue {
     metrics.timeResolving.average[outcome] = ((metrics.timeResolving.average[outcome] * metrics[outcome]) + resolving) / (metrics[outcome] + 1); 
 
     metrics[outcome]++;
+
+    const now = Date.now();
+    const secondsPassed = (now - p(this).createdAt) / 1000;
+    metrics.resolvedPerSecond[outcome] = metrics[outcome] / secondsPassed;
   }
 }
 
