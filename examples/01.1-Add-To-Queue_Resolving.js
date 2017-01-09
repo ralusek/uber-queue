@@ -29,7 +29,4 @@ queue.resolve('hello');
 // regarding Subscribing.
 
 
-setTimeout(() => {
-  console.log(JSON.stringify(queue.getMetadata(), null, 2));
-}, 2500);
-
+// We'll get to how to get things OUT of the queue in section 2, Read From Queue.

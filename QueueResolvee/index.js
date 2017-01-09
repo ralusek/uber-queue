@@ -11,12 +11,15 @@ const ERROR = CONSTANTS.ERROR;
 const RESOLVEE_TYPE = CONSTANTS.RESOLVEE_TYPE;
 
 const resolve = Object.freeze({
+  // Resolve Resolvee which is a Function.
   [RESOLVEE_TYPE.FUNCTION]: (queueResolvee, previous) => {
     return Promise.resolve(p(queueResolvee).resolvee(previous));
   },
+  // Resolve Resolvee which is a QueueResult.
   [RESOLVEE_TYPE.QUEUE_RESULT]: (queueResolvee, previous) => {
     return p(queueResolvee).resolvee.resolve();
   },
+  // Resolve Resolvee which is an undetermined type.
   [RESOLVEE_TYPE.WILD]: (queueResolvee, previous) => {
     return Promise.resolve(p(queueResolvee).resolvee);
   }

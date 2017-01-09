@@ -11,9 +11,6 @@ let uniqueCounter = 0;
 
 /**
  * Fetch a 'user' from a 'database'.
- * If your name happens to be 'First N', where 'N' is an integer between 0 and
- * Infinity, please not that given enough time and resources, part of your personal
- * information may be disclosed.
  */
 module.exports.fetchUser = (time) => {
   const counter = uniqueCounter++;
@@ -24,7 +21,7 @@ module.exports.fetchUser = (time) => {
       firstName: `First ${counter}`,
       lastName: `Last ${counter}`,
       email: `email@${counter}.com`
-    }), time);
+    }), (time * Math.random));
   });
 };
 

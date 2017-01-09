@@ -47,6 +47,10 @@ class QueueResult {
     };
   }
 
+  /**
+   * Depending on whether or not this result has an associated error, this will
+   * resolve or reject.
+   */
   resolve() {
     if (p(this).error) return Promise.reject(this);
     return Promise.resolve(this);

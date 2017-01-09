@@ -32,11 +32,51 @@ const DEFAULT = Object.freeze({
   }
 });
 
+const METRIC_BOILERPLATE = () => ({
+  resolving: 0,
+  totalQueued: 0,
+  success: 0,
+  error: 0,
+  timeInQueue: {
+    average: {
+      success: 0,
+      error: 0
+    },
+    max: {
+      success: 0,
+      error: 0
+    },
+    min: {
+      success: Infinity,
+      error: Infinity
+    }
+  },
+  timeResolving: {
+    average: {
+      success: 0,
+      error: 0
+    },
+    max: {
+      success: 0,
+      error: 0
+    },
+    min: {
+      success: Infinity,
+      error: Infinity
+    }
+  },
+  resolvedPerSecond: {
+    success: 0,
+    error: 0
+  }
+});
+
 
 module.exports = Object.freeze({
   MODE,
   DEFAULT,
   ACTION,
   EVENT,
-  ERROR
+  ERROR,
+  METRIC_BOILERPLATE
 });

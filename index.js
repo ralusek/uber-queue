@@ -32,44 +32,7 @@ class UberQueue {
 
     p(this).createdAt = Date.now();
 
-    p(this).metrics = {
-      resolving: 0,
-      totalQueued: 0,
-      success: 0,
-      error: 0,
-      timeInQueue: {
-        average: {
-          success: 0,
-          error: 0
-        },
-        max: {
-          success: 0,
-          error: 0
-        },
-        min: {
-          success: Infinity,
-          error: Infinity
-        }
-      },
-      timeResolving: {
-        average: {
-          success: 0,
-          error: 0
-        },
-        max: {
-          success: 0,
-          error: 0
-        },
-        min: {
-          success: Infinity,
-          error: Infinity
-        }
-      },
-      resolvedPerSecond: {
-        success: 0,
-        error: 0
-      }
-    };
+    p(this).metrics = CONSTANTS.METRIC_BOILERPLATE();
 
     p(this).state = {
       completed: false,
@@ -94,6 +57,7 @@ class UberQueue {
     // Additional conditionals can be set by the user.
     p(this).conditionals = Object.freeze({
       [ACTION.REFRESH]: new Set([
+        // Ensures that not in Active mode and already awaiting next value.
         () => !((p(this).mode === MODE.ACTIVE) && !p(this).emitter.isAwaitingNext(EVENT.RESOLVED))
       ]),
       [ACTION.RESOLVE]: new Set([
