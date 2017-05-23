@@ -27,8 +27,8 @@ setTimeout(() => {
   console.log('Queue 1 After', queue1.getMetadata());
   console.log('Timeout.', queue2.getMetadata());
 
-  queue2.next()
-  .then((x) => {
-    console.log('SUPs', x);
-  });
+  // queue2.next()
+  // .then((x) => {
+  //   console.log('SUPs', x);
+  // });
 }, 2500);

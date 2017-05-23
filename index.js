@@ -255,7 +255,6 @@ class UberQueue {
    */
   refresh() {
     if (!this._canRefresh()) return;
-
     setTimeout(() => {
       this._resolveNext();
 
